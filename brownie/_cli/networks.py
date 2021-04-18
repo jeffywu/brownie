@@ -54,6 +54,7 @@ DEV_CMD_SETTINGS = (
     "time",
     "network_id",
     "chain_id",
+    "db"
 )
 
 

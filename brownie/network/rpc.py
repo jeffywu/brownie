@@ -42,6 +42,7 @@ CLI_FLAGS = {
     "unlock": "--unlock",
     "network_id": "--networkId",
     "chain_id": "--chainId",
+    "db": "--db"
 }
 
 EVM_VERSIONS = ["byzantium", "constantinople", "petersburg", "istanbul"]
@@ -99,6 +100,7 @@ class Rpc(metaclass=_Singleton):
         if kwargs["evm_version"] in EVM_EQUIVALENTS:
             kwargs["evm_version"] = EVM_EQUIVALENTS[kwargs["evm_version"]]  # type: ignore
         kwargs = _validate_cmd_settings(kwargs)
+        out = DEVNULL if sys.platform == "win32" else PIPE
         for key, value in [(k, v) for k, v in kwargs.items() if v]:
             if key == "unlock":
                 if not isinstance(value, list):
@@ -107,6 +109,15 @@ class Rpc(metaclass=_Singleton):
                     if isinstance(address, int):
                         address = HexBytes(address.to_bytes(20, "big")).hex()
                     cmd_list.extend([CLI_FLAGS[key], address])
+            if key == "log":
+                if not isinstance(value, str):
+                    warnings.warn(
+                        f"Invalid log commandline setting, must be a string: "
+                        f'"{key}" with value "{value}".',
+                        InvalidArgumentWarning,
+                    )
+                out = open(value, "wb")
+                self.logfile = out
             else:
                 try:
                     cmd_list.extend([CLI_FLAGS[key], str(value)])
@@ -117,8 +128,7 @@ class Rpc(metaclass=_Singleton):
                         InvalidArgumentWarning,
                     )
         print(f"\nLaunching '{' '.join(cmd_list)}'...")
-        out = DEVNULL if sys.platform == "win32" else PIPE
-        self._rpc = psutil.Popen(cmd_list, stdin=DEVNULL, stdout=out, stderr=out)
+        self._rpc = psutil.Popen(cmd_list, stdin=DEVNULL, stdout=self.out, stderr=self.out)
         # check that web3 can connect
         if not web3.provider:
             chain._network_disconnected()
@@ -181,6 +191,10 @@ class Rpc(metaclass=_Singleton):
         self._rpc.kill()
         self._rpc.wait()
         self._rpc = None
+
+        if self.logfile:
+            self.logfile.close()
+
         chain._network_disconnected()
 
     def is_active(self) -> bool:
@@ -306,6 +320,7 @@ def _validate_cmd_settings(cmd_settings: dict) -> dict:
         "fork": str,
         "network_id": int,
         "chain_id": int,
+        "db": str
     }
     for cmd, value in cmd_settings.items():
         if (
