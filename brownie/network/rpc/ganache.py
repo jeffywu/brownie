@@ -29,6 +29,7 @@ CLI_FLAGS = {
     "unlock": "--unlock",
     "network_id": "--networkId",
     "chain_id": "--chainId",
+    "log": "--log",
     "db": "--db"
 }
 
@@ -130,6 +131,7 @@ def _validate_cmd_settings(cmd_settings: dict) -> dict:
         "fork": str,
         "network_id": int,
         "chain_id": int,
+        "log": str,
         "db": str
     }
     for cmd, value in cmd_settings.items():
