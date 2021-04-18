@@ -19,7 +19,6 @@ from brownie._singleton import _Singleton
 from brownie.convert import EthAddress, Wei, to_address
 from brownie.exceptions import (
     ContractNotFound,
-    IncompatibleEVMVersion,
     TransactionError,
     UnknownAccount,
     VirtualMachineError,
@@ -141,7 +140,7 @@ class Accounts(metaclass=_Singleton):
         return account
 
     def from_mnemonic(
-        self, mnemonic: str, count: int = 1, offset: int = 0
+        self, mnemonic: str, count: int = 1, offset: int = 0, passphrase: str = ""
     ) -> Union["LocalAccount", List["LocalAccount"]]:
         """
         Generate one or more `LocalAccount` objects from a seed phrase.
@@ -154,12 +153,14 @@ class Accounts(metaclass=_Singleton):
             The number of `LocalAccount` objects to create
         offset : int, optional
             The initial account index to create accounts from
+        passphrase : str, optional
+            Additional passphrase to combine with the mnemonnic
         """
         new_accounts = []
 
         for i in range(offset, offset + count):
             w3account = eth_account.Account.from_mnemonic(
-                mnemonic, account_path=f"m/44'/60'/0'/0/{i}"
+                mnemonic, passphrase=passphrase, account_path=f"m/44'/60'/0'/0/{i}"
             )
 
             account = LocalAccount(w3account.address, w3account, w3account.key)
@@ -233,8 +234,7 @@ class Accounts(metaclass=_Singleton):
             acct = Account(address)
 
             if CONFIG.network_type == "development" and address not in web3.eth.accounts:
-                # prior to ganache v6.11.0 this does nothing, but should not raise
-                web3.provider.make_request("evm_unlockUnknownAccount", [address])  # type: ignore
+                rpc.unlock_account(address)
 
             self._accounts.append(acct)
 
@@ -402,7 +402,7 @@ class _PrivateKeyAccount(PublicKeyAccount):
             msg = exc.args[0]["message"] if isinstance(exc.args[0], dict) else str(exc)
             raise ValueError(
                 f"Execution reverted during call: '{msg}'. This transaction will likely revert. "
-                "If you wish to broadcast, include `allow_revert=True` as a transaction parameter.",
+                "If you wish to broadcast, include `allow_revert:True` as a transaction parameter.",
             ) from None
 
     def deploy(
@@ -440,11 +440,6 @@ class _PrivateKeyAccount(PublicKeyAccount):
         if gas_limit and gas_buffer:
             raise ValueError("Cannot set gas_limit and gas_buffer together")
 
-        evm = contract._build["compiler"]["evm_version"]
-        if rpc.is_active() and not rpc.evm_compatible(evm):
-            raise IncompatibleEVMVersion(
-                f"Local RPC using '{rpc.evm_version()}' but contract was compiled for '{evm}'"
-            )
         data = contract.deploy.encode_input(*args)
         if silent is None:
             silent = bool(CONFIG.mode == "test" or CONFIG.argv["silent"])
@@ -767,5 +762,6 @@ class LocalAccount(_PrivateKeyAccount):
             allow_revert = bool(CONFIG.network_type == "development")
         if not allow_revert:
             self._check_for_revert(tx)
+        tx["chainId"] = web3.chain_id
         signed_tx = self._acct.sign_transaction(tx).rawTransaction  # type: ignore
         return web3.eth.sendRawTransaction(signed_tx)

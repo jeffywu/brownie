@@ -291,7 +291,11 @@ class ContractContainer(_ContractBase):
                                 import_aliases[imp.get("absolutePath")].append(
                                     symbol_alias["local"],
                                 )
-            has_abiencoder = "pragma experimental ABIEncoderV2;" in pragma_statements
+
+            abiencoder_str = ""
+            for pragma in ("pragma experimental ABIEncoderV2;", "pragma abicoder v2;"):
+                if pragma in pragma_statements:
+                    abiencoder_str = f"{abiencoder_str}\n{pragma}"
 
             # build dependency tree
             dependency_tree: Dict = defaultdict(set)
@@ -344,14 +348,13 @@ class ContractContainer(_ContractBase):
 
             # combine to final flattened source
             lb = "\n"
-            abiencoder_str = "\npragma experimental ABIEncoderV2;"
             is_global = len(global_enums) + len(global_structs) > 0
             global_str = "// Global Enums and Structs\n\n" if is_global else ""
             enum_structs = f"{lb.join(global_enums)}\n\n{lb.join(global_structs)}"
             flattened_source = (
                 f"// SPDX-License-Identifier: {license_identifier}\n\n"
                 f"pragma solidity {version_short};"
-                f"{abiencoder_str if has_abiencoder else ''}\n\n{global_str}"
+                f"{abiencoder_str}\n\n{global_str}"
                 f"{enum_structs if is_global else ''}"
                 f"{flattened_source}\n\n"
                 f"// File: {file_name}\n\n{source}\n"
@@ -373,21 +376,25 @@ class ContractContainer(_ContractBase):
         """Flatten contract and publish source on the selected explorer"""
 
         # Check required conditions for verifying
+        explorer_tokens = {"etherscan": "ETHERSCAN_TOKEN", "bscscan": "BSCSCAN_TOKEN"}
         url = CONFIG.active_network.get("explorer")
         if url is None:
             raise ValueError("Explorer API not set for this network")
-        if "etherscan" not in url:
+        env_token = next((v for k, v in explorer_tokens.items() if k in url), None)
+        if env_token is None:
             raise ValueError(
-                "Publishing source is only supported on etherscan, change the Explorer API"
+                f"Publishing source is only supported on {', '.join(explorer_tokens)},"
+                "change the Explorer API"
             )
 
-        if os.getenv("ETHERSCAN_TOKEN"):
-            api_key = os.getenv("ETHERSCAN_TOKEN")
+        if os.getenv(env_token):
+            api_key = os.getenv(env_token)
         else:
+            host = urlparse(url).netloc
+            host = host[host.index(".") + 1 :]
             raise ValueError(
-                "An Etherscan API token is required to verify contract source code. "
-                "Visit https://etherscan.io/register to obtain a token, and then store it "
-                "as the environment variable $ETHERSCAN_TOKEN"
+                f"An API token is required to verify contract source code. Visit https://{host}/ "
+                f"to obtain a token, and then store it as the environment variable ${env_token}"
             )
 
         address = _resolve_address(contract.address)
@@ -453,7 +460,7 @@ class ContractContainer(_ContractBase):
                 if i >= 10:
                     raise ValueError(f"API request failed with: {data['result']}")
                 elif i == 0 and not silent:
-                    print("Waiting for etherscan to process contract...")
+                    print(f"Waiting for {url} to process contract...")
                 i += 1
                 time.sleep(10)
 
@@ -771,11 +778,18 @@ class _DeployedContractBase(_ContractBase):
         if name == "balance":
             warnings.warn(
                 f"'{self._name}' defines a 'balance' function, "
-                f"'{self._name}.balance' is unavailable",
+                f"'{self._name}.balance' is available as {self._name}.wei_balance",
                 BrownieEnvironmentWarning,
             )
+            setattr(self, "wei_balance", self.balance)
         elif hasattr(self, name):
-            raise AttributeError(f"Namespace collision: '{self._name}.{name}'")
+            warnings.warn(
+                "Namespace collision between contract function and "
+                f"brownie `Contract` class member: '{self._name}.{name}'\n"
+                f"The {name} function will not be available when interacting with {self._name}",
+                BrownieEnvironmentWarning,
+            )
+            return
         setattr(self, name, obj)
 
     def __hash__(self) -> int:
@@ -1832,6 +1846,17 @@ def _fetch_from_explorer(address: str, action: str, silent: bool) -> Dict:
     if address in _unverified_addresses:
         raise ValueError(f"Source for {address} has not been verified")
 
+    code = web3.eth.getCode(address).hex()[2:]
+    # EIP-1167: Minimal Proxy Contract
+    if code[:20] == "363d3d373d3d3d363d73" and code[60:] == "5af43d82803e903d91602b57fd5bf3":
+        address = _resolve_address(code[20:60])
+    # Vyper <0.2.9 `create_forwarder_to`
+    elif (
+        code[:30] == "366000600037611000600036600073"
+        and code[70:] == "5af4602c57600080fd5b6110006000f3"
+    ):
+        address = _resolve_address(code[30:70])
+
     params: Dict = {"module": "contract", "action": action, "address": address}
     if "etherscan" in url:
         if os.getenv("ETHERSCAN_TOKEN"):
@@ -1841,6 +1866,16 @@ def _fetch_from_explorer(address: str, action: str, silent: bool) -> Dict:
                 "No Etherscan API token set. You may experience issues with rate limiting. "
                 "Visit https://etherscan.io/register to obtain a token, and then store it "
                 "as the environment variable $ETHERSCAN_TOKEN",
+                BrownieEnvironmentWarning,
+            )
+    elif "bscscan" in url:
+        if os.getenv("BSCSCAN_TOKEN"):
+            params["apiKey"] = os.getenv("BSCSCAN_TOKEN")
+        elif not silent:
+            warnings.warn(
+                "No BSCScan API token set. You may experience issues with rate limiting. "
+                "Visit https://bscscan.com/register to obtain a token, and then store it "
+                "as the environment variable $BSCSCAN_TOKEN",
                 BrownieEnvironmentWarning,
             )
 
@@ -1855,7 +1890,7 @@ def _fetch_from_explorer(address: str, action: str, silent: bool) -> Dict:
         raise ConnectionError(f"Status {response.status_code} when querying {url}: {response.text}")
     data = response.json()
     if int(data["status"]) != 1:
-        raise ValueError(f"Failed to retrieve data from API: {data['result']}")
+        raise ValueError(f"Failed to retrieve data from API: {data}")
 
     return data
 

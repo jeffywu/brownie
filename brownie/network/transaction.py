@@ -17,7 +17,7 @@ from web3.exceptions import TimeExhausted, TransactionNotFound
 
 from brownie._config import CONFIG
 from brownie.convert import EthAddress, Wei
-from brownie.exceptions import RPCRequestError
+from brownie.exceptions import ContractNotFound, RPCRequestError
 from brownie.project import build
 from brownie.project import main as project_main
 from brownie.project.compiler.solidity import SOLIDITY_ERROR_CODES
@@ -120,7 +120,7 @@ class TransactionReceipt:
     contract_name = None
     fn_name = None
     gas_used = None
-    logs = None
+    logs: Optional[List] = None
     nonce = None
     sender = None
     txid: str
@@ -204,7 +204,10 @@ class TransactionReceipt:
     def events(self) -> Optional[EventDict]:
         if self._events is None:
             if self.status:
-                self._events = _decode_logs(self.logs)  # type: ignore
+                # relay contract map so we can decode ds-note logs
+                addrs = {log.address for log in self.logs} if self.logs else set()
+                contracts = {addr: state._find_contract(addr) for addr in addrs}
+                self._events = _decode_logs(self.logs, contracts=contracts)  # type: ignore
             else:
                 self._get_trace()
                 # get events from the trace - handled lazily so that other
@@ -513,10 +516,18 @@ class TransactionReceipt:
         self.nonce = tx["nonce"]
 
         # if receiver is a known contract, set function name
-        if not self.fn_name and state._find_contract(tx["to"]) is not None:
+        if self.fn_name:
+            return
+        try:
             contract = state._find_contract(tx["to"])
-            self.contract_name = contract._name
-            self.fn_name = contract.get_method(tx["input"])
+            if contract is not None:
+                self.contract_name = contract._name
+                self.fn_name = contract.get_method(tx["input"])
+        except ContractNotFound:
+            # required in case the contract has self destructed
+            # other aspects of functionality will be broken, but this way we
+            # can at least return a receipt
+            pass
 
     def _set_from_receipt(self, receipt: Dict) -> None:
         """Sets object attributes based on the transaction reciept."""
@@ -537,7 +548,7 @@ class TransactionReceipt:
         self.coverage_hash = sha1(base.encode()).hexdigest()
 
         if self.fn_name:
-            state.TxHistory()._gas(self._full_name(), receipt["gasUsed"])
+            state.TxHistory()._gas(self._full_name(), receipt["gasUsed"], self.status == Status(1))
 
     def _confirm_output(self) -> str:
         status = ""
@@ -667,11 +678,16 @@ class TransactionReceipt:
 
                     # if this is the optimizer revert, find the actual source
                     if "optimizer_revert" in pc_map[step["pc"]]:
-                        idx = trace.index(step)
-                        while trace[idx]["op"] != "JUMPDEST":
-                            # look for the most recent jump
+                        idx = trace.index(step) - 1
+
+                        # look for the most recent jump
+                        while trace[idx + 1]["op"] != "JUMPDEST":
+                            if trace[idx]["source"] != step["source"]:
+                                # if we find another line with a differing source offset prior
+                                # to a JUMPDEST, the optimizer revert is also the actual revert
+                                idx = trace.index(step)
+                                break
                             idx -= 1
-                        idx -= 1
                         while not trace[idx]["source"]:
                             # now we're in a yul optimization, keep stepping back
                             # until we find a source offset
@@ -680,6 +696,7 @@ class TransactionReceipt:
                         step["source"] = trace[idx]["source"]
                         step = trace[idx]
 
+                    # breakpoint()
                     if "dev" in pc_map[step["pc"]]:
                         self._dev_revert_msg = pc_map[step["pc"]]["dev"]
                     else:
@@ -707,8 +724,8 @@ class TransactionReceipt:
                     self._dev_revert_msg = ""
                 return
 
-        step = next(i for i in trace[::-1] if i["op"] in ("REVERT", "INVALID"))
-        self._revert_msg = "invalid opcode" if step["op"] == "INVALID" else ""
+        op = next((i["op"] for i in trace[::-1] if i["op"] in ("REVERT", "INVALID")), None)
+        self._revert_msg = "invalid opcode" if op == "INVALID" else ""
 
     def _expand_trace(self) -> None:
         """Adds the following attributes to each step of the stack trace:
@@ -1092,7 +1109,10 @@ class TransactionReceipt:
         except StopIteration:
             return ""
 
-        result = [next(i for i in trace_range if trace[i]["source"])]
+        try:
+            result = [next(i for i in trace_range if trace[i]["source"])]
+        except StopIteration:
+            return ""
         depth, jump_depth = trace[idx]["depth"], trace[idx]["jumpDepth"]
 
         while True:
