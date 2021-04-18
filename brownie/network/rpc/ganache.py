@@ -68,7 +68,6 @@ def launch(cmd: str, **kwargs: Dict) -> None:
                     InvalidArgumentWarning,
                 )
             out = open(value, "wb")
-            self.logfile = out
         else:
             try:
                 cmd_list.extend([CLI_FLAGS[key], str(value)])
@@ -79,7 +78,6 @@ def launch(cmd: str, **kwargs: Dict) -> None:
                     InvalidArgumentWarning,
                 )
     print(f"\nLaunching '{' '.join(cmd_list)}'...")
-    self._rpc = psutil.Popen(cmd_list, stdin=DEVNULL, stdout=self.out, stderr=self.out)
 
     return psutil.Popen(cmd_list, stdin=DEVNULL, stdout=out, stderr=out)
 
